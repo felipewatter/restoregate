@@ -70,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           TAG_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v0.1.0" --jq '.object.sha' 2>/dev/null || true)"
-          if ${{ -n "$TAG_SHA" && "$TAG_SHA" != "$VERIFIED_SHA" }}; then
+          if [[ -n "$TAG_SHA" && "$TAG_SHA" != "$VERIFIED_SHA" ]]; then
             echo 'Tag collision: existing tag points to different commit'; exit 1
           fi
           mkdir -p dist
