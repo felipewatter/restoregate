@@ -1,0 +1,84 @@
+name: Bootstrap Release v0.1.0 (CI-gated)
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: restoregate-bootstrap-v0.1.0
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip if v0.1.0 has already been published
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view 'v0.1.0' --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+            echo 'Release already exists. No-op.'
+          else
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Check out the exact successful CI commit
+        if: steps.existing.outputs.skip == 'false'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Set up Python
+        if: steps.existing.outputs.skip == 'false'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Confirm main revision, CI, version and tests
+        if: steps.existing.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFIED_SHA: ${{ github.event.workflow_run.head_sha }}
+          VERIFIED_RUN_ID: ${{ github.event.workflow_run.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          test "$MAIN_SHA" = "$VERIFIED_SHA" || { echo 'CI does not match current main'; exit 1; }
+          test "$(git rev-parse HEAD)" = "$VERIFIED_SHA" || { echo 'Wrong checkout revision'; exit 1; }
+          RUN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$VERIFIED_RUN_ID" --jq '.head_sha')"
+          RUN_RESULT="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$VERIFIED_RUN_ID" --jq '.conclusion')"
+          test "$RUN_SHA" = "$VERIFIED_SHA" && test "$RUN_RESULT" = 'success'
+          PACKAGE_VERSION="$(PYTHONPATH=src python -c 'from restoregate import __version__; print(__version__)')"
+          test "$PACKAGE_VERSION" = '0.1.0' || { echo 'Wrong package version'; exit 1; }
+          python -m compileall -q src tests
+          python -m unittest discover -s tests -q
+      - name: Create archive, verify tag and publish release
+        if: steps.existing.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFIED_SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v0.1.0" --jq '.object.sha' 2>/dev/null || true)"
+          if ${{ -n "$TAG_SHA" && "$TAG_SHA" != "$VERIFIED_SHA" }}; then
+            echo 'Tag collision: existing tag points to different commit'; exit 1
+          fi
+          mkdir -p dist
+          git archive --format=zip --prefix=restoregate/ HEAD > dist/restoregate-v0.1.0.zip
+          (cd dist && sha256sum restoregate-v0.1.0.zip > restoregate-v0.1.0.zip.sha256)
+          gh release create 'v0.1.0' \
+            dist/restoregate-v0.1.0.zip \
+            dist/restoregate-v0.1.0.zip.sha256 \
+            --target "$VERIFIED_SHA" \
+            --title 'RestoreGate v0.1.0' \
+            --notes-file RELEASE_NOTES.md
