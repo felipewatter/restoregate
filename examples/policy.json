@@ -1,0 +1,11 @@
+{
+  "max_archive_bytes": 1073741824,
+  "max_total_bytes": 1073741824,
+  "max_file_bytes": 268435456,
+  "max_members": 10000,
+  "max_ratio": 200,
+  "max_depth": 32,
+  "max_age_hours": 168,
+  "min_files": 2,
+  "required_paths": ["database/dump.sql", "configs/app.conf"]
+}

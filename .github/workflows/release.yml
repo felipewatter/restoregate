@@ -1,0 +1,79 @@
+name: Release (manual, CI-gated)
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Version tag (must match package version, e.g. v0.1.0)
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: restoregate-release
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the exact commit to release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Validate version and run tests
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid semantic tag'; exit 1; }
+          PACKAGE_VERSION="$(PYTHONPATH=src python -c 'from restoregate import __version__; print(__version__)')"
+          test "$RELEASE_TAG" = "v$PACKAGE_VERSION"
+          python -m compileall -q src tests
+          python -m unittest discover -s tests -q
+      - name: Require successful push CI for the exact release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SUCCESS_COUNT="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=completed&per_page=100" --jq '[.workflow_runs[] | select(.conclusion == "success" and .event == "push")] | length')"
+          test "$SUCCESS_COUNT" -gt 0 || { echo 'Successful push CI not found for current commit'; exit 1; }
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the exact validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Package committed source and SHA-256 checksum
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          git archive --format=zip --prefix=restoregate/ HEAD > "dist/restoregate-${RELEASE_TAG}.zip"
+          (cd dist && sha256sum "restoregate-${RELEASE_TAG}.zip" > "restoregate-${RELEASE_TAG}.zip.sha256")
+      - name: Publish release after all gates pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            "dist/restoregate-${RELEASE_TAG}.zip" \
+            "dist/restoregate-${RELEASE_TAG}.zip.sha256" \
+            --target "$GITHUB_SHA" \
+            --title "RestoreGate $RELEASE_TAG" \
+            --notes-file RELEASE_NOTES.md
